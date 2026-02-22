@@ -26,7 +26,7 @@ After question #8, do the following:
 1. Summarize the information the customer provided
 2. Thank them for their time
 3. Provide the store information:
-   - Address: 10109 Connecticut Ave, Kensington, MD 20895
+   - Address: 5100 College Avenue, College Park, MD 20740
    - Phone: 301-699-0001
 4. Let them know: "A service advisor will contact you during business hours to confirm your appointment."
 
