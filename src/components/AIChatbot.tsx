@@ -1,8 +1,5 @@
 "use client";
 
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
-import type { UIMessage } from "ai";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getSessionId } from "@/lib/session";
 import { sendTranscriptEmail } from "@/lib/email";
@@ -11,12 +8,21 @@ interface AIChatbotProps {
   onClose: () => void;
 }
 
-function getTextContent(message: UIMessage): string {
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  parts: { type: "text"; text: string }[];
+  createdAt?: Date;
+}
+
+function getTextContent(message: Message): string {
   for (const part of message.parts) {
     if (part.type === "text") return part.text;
   }
   return "";
 }
+
+const GREETING = "Hi there! Welcome to CND Auto Service. I'm here to help get your service request started. What's your name?";
 
 export function AIChatbot({ onClose }: AIChatbotProps) {
   const [conversationId] = useState(() => crypto.randomUUID());
@@ -24,38 +30,99 @@ export function AIChatbot({ onClose }: AIChatbotProps) {
   const [intakeComplete, setIntakeComplete] = useState(false);
   const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "greeting",
+      role: "assistant",
+      parts: [{ type: "text", text: GREETING }],
+    },
+  ]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
 
-  const { messages, sendMessage, status, error } = useChat({
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-    }),
-    messages: [
-      {
-        id: "greeting",
-        role: "assistant" as const,
-        parts: [
-          {
-            type: "text" as const,
-            text: "Hi there! Welcome to CND Auto Service. I'm here to help get your service request started. What's your phone number?",
-          },
-        ],
-        createdAt: new Date(),
-      },
-    ],
-    onFinish: ({ message }) => {
-      const text = getTextContent(message);
-      if (text.includes("[INTAKE_COMPLETE]")) {
+  const sendMessage = useCallback(async (text: string) => {
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text }],
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [...messages, userMessage] }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error("Failed to send message");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantMessage = "";
+      const assistantId = crypto.randomUUID();
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          parts: [],
+          createdAt: new Date(),
+        },
+      ]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") continue;
+
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === "text-delta" && parsed.delta) {
+                assistantMessage += parsed.delta;
+
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, parts: [{ type: "text" as const, text: assistantMessage }] }
+                      : m
+                  )
+                );
+              }
+            } catch {
+              // Skip malformed JSON
+            }
+          }
+        }
+      }
+
+      if (assistantMessage.includes("[INTAKE_DONE]")) {
         setIntakeComplete(true);
       }
-    },
-  });
-
-  const isLoading = status === "streaming" || status === "submitted";
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error("Unknown error"));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [messages]);
 
   const saveConversation = useCallback(
-    async (msgs: UIMessage[], convStatus = "active") => {
+    async (msgs: Message[], convStatus = "active") => {
       try {
         const transcript = msgs.map((m) => ({
           role: m.role,
@@ -120,7 +187,7 @@ export function AIChatbot({ onClose }: AIChatbotProps) {
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
-    sendMessage({ text: input });
+    sendMessage(input);
     setInput("");
   };
 
@@ -148,7 +215,7 @@ export function AIChatbot({ onClose }: AIChatbotProps) {
         <div className="flex-1 overflow-y-auto px-4 py-4">
           <div className="flex flex-col gap-3">
             {messages.map((m) => {
-              const text = getTextContent(m).replace("[INTAKE_COMPLETE]", "").trim();
+              const text = getTextContent(m).replace("[INTAKE_DONE]", "").trim();
               const role = m.role as string;
               if (!text) return null;
               return (
